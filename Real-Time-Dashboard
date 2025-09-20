@@ -1,0 +1,307 @@
+Real-Time Dashboard (Vite + React + TypeScript)
+
+## package.json
+```json
+{
+  "name": "real-time-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "echo \"no lint configured\"",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@tanstack/react-query": "^4.34.0",
+    "recharts": "^2.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "vitest": "^0.34.0"
+  }
+}
+
+
+## tsconfig.json
+json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["DOM", "ESNext"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}
+
+
+## vite.config.ts
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+})
+
+
+## public/sw\.js
+A tiny service worker that caches the shell and API responses (simple example, extend for production).
+const CACHE_NAME = 'rtd-v1';
+const SHELL = ['/', '/index.html', '/src/styles.css'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(SHELL)));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  // Try network first for API requests, fallback to cache
+  if (url.hostname.includes('api.coingecko.com')) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const resClone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, resClone));
+          return res;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
+  // For other requests, serve from cache then network
+  e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
+});
+
+
+## src/main.tsx
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import App from './App'
+import './styles.css'
+import './registerServiceWorker'
+const queryClient = new QueryClient()
+createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>
+  </React.StrictMode>
+)
+
+
+## src/registerServiceWorker.ts
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => {
+      console.warn('SW registration failed:', err)
+    })
+  })
+}
+
+
+## src/api.ts
+export const COINGECKO_MARKETS = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=1h,24h'
+
+export async function fetchMarkets() {
+  const res = await fetch(COINGECKO_MARKETS)
+  if (!res.ok) throw new Error('Network response was not ok')
+  return res.json()
+}
+
+
+## src/hooks/useCoins.ts
+import { useQuery } from '@tanstack/react-query'
+import { fetchMarkets } from '../api'
+
+export function useCoins(pollInterval = 10000) {
+  return useQuery(['coins'], fetchMarkets, {
+    refetchInterval: pollInterval, // polling for "real-time" updates
+    staleTime: 5000,
+    cacheTime: 1000 * 60 * 5,
+    retry: 1,
+  })
+}
+
+
+## src/components/CoinsTable.tsx
+import React, { useMemo, useState } from 'react'
+type Coin = any
+export default function CoinsTable({ coins }: { coins: Coin[] }) {
+  const [query, setQuery] = useState('')
+  const [sortKey, setSortKey] = useState<'market_cap' | 'current_price'>('market_cap')
+  const [page, setPage] = useState(1)
+  const perPage = 10
+
+  const filtered = useMemo(() => {
+    return coins
+      .filter((c) => c.name.toLowerCase().includes(query.toLowerCase()) || c.symbol.toLowerCase().includes(query.toLowerCase()))
+      .sort((a, b) => b[sortKey] - a[sortKey])
+  }, [coins, query, sortKey])
+
+  const pageItems = filtered.slice((page - 1) * perPage, page * perPage)
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <input placeholder="Search" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1) }} />
+        <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
+          <option value="market_cap">Market Cap</option>
+          <option value="current_price">Price</option>
+        </select>
+      </div>
+      <table className="coins-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Name</th>
+            <th>Price</th>
+            <th>Market Cap</th>
+            <th>24h</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pageItems.map((c) => (
+            <tr key={c.id}>
+              <td>{c.market_cap_rank}</td>
+              <td className="coin-cell">
+                <img src={c.image} alt="" width={20} height={20} /> {c.name} <small>({c.symbol.toUpperCase()})</small>
+              </td>
+              <td>${c.current_price.toLocaleString()}</td>
+              <td>${c.market_cap.toLocaleString()}</td>
+              <td className={c.price_change_percentage_24h >= 0 ? 'up' : 'down'}>
+                {c.price_change_percentage_24h?.toFixed(2)}%
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
+        <div>Showing {((page - 1) * perPage) + 1} - {Math.min(page * perPage, filtered.length)} of {filtered.length}</div>
+        <div>
+          <button onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
+          <button onClick={() => setPage((p) => p + 1)}>Next</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+## src/components/PriceChart.tsx
+import React from 'react'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+
+export default function PriceChart({ coins }: { coins: any[] }) {
+  // use top 10 coins' current price as series to demonstrate a chart
+  const data = coins.slice(0, 10).map((c) => ({ name: c.symbol.toUpperCase(), price: c.current_price }))
+
+  return (
+    <div style={{ width: '100%', height: 240 }}>
+      <ResponsiveContainer>
+        <LineChart data={data}>
+          <XAxis dataKey="name" />
+          <YAxis />
+          <Tooltip />
+          <Line type="monotone" dataKey="price" stroke="#8884d8" dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+
+## src/App.tsx
+import React, { useEffect, useState } from 'react'
+import { useCoins } from './hooks/useCoins'
+import CoinsTable from './components/CoinsTable'
+import PriceChart from './components/PriceChart'
+
+export default function App() {
+  const { data, isLoading, isError, error, refetch } = useCoins(10000)
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('theme') as 'light' | 'dark') || 'light')
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('theme', theme)
+  }, [theme])
+
+  if (isLoading) return <div className="center">Loading…</div>
+  if (isError) return <div className="center">Error: {(error as Error).message} <button onClick={() => refetch()}>Retry</button></div>
+
+  return (
+    <div className="container">
+      <header>
+        <h1>Real-Time Crypto Dashboard</h1>
+        <div>
+          <button onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}>Toggle Theme</button>
+        </div>
+      </header>
+
+      <main>
+        <section className="chart">
+          <PriceChart coins={data} />
+        </section>
+
+        <section className="table">
+          <CoinsTable coins={data} />
+        </section>
+      </main>
+
+      <footer>Data fetched from CoinGecko (public API). Polling every 10s.</footer>
+    </div>
+  )
+}
+
+
+## src/styles.css
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --card: #f9fafb;
+}
+:root[data-theme='dark'] {
+  --bg: #0b1220;
+  --text: #e6eef8;
+  --muted: #9aa7bd;
+  --card: #0f1724;
+}
+
+html,body,#root { height:100%; }
+body { margin:0; font-family: Inter, system-ui, sans-serif; background:var(--bg); color:var(--text); }
+.container { max-width:1100px; margin:24px auto; padding:16px; }
+header { display:flex; justify-content:space-between; align-items:center; }
+.coins-table { width:100%; border-collapse:collapse; }
+.coins-table th, .coins-table td { text-align:left; padding:8px; border-bottom:1px solid rgba(0,0,0,0.06); }
+.coin-cell img { vertical-align:middle; margin-right:8px }
+.up { color: #16a34a }
+.down { color: #dc2626 }
+.center { display:flex; justify-content:center; align-items:center; height:200px }
+
+@media (min-width:800px) { main { display:grid; grid-template-columns: 1fr 1fr; gap:16px } }
+
+ 
